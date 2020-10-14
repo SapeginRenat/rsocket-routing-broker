@@ -17,7 +17,6 @@
 package io.rsocket.routing.broker.spring;
 
 import java.util.concurrent.CancellationException;
-import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import io.rsocket.SocketAcceptor;
@@ -30,12 +29,13 @@ import io.rsocket.routing.broker.RSocketIndex;
 import io.rsocket.routing.broker.RoutingTable;
 import io.rsocket.routing.broker.acceptor.BrokerSocketAcceptor;
 import io.rsocket.routing.broker.acceptor.ClusterSocketAcceptor;
-import io.rsocket.routing.broker.query.CombinedRSocketQuery;
 import io.rsocket.routing.broker.locator.CompositeRSocketLocator;
-import io.rsocket.routing.broker.query.RSocketQuery;
-import io.rsocket.routing.broker.rsocket.MulticastRSocketLocator;
 import io.rsocket.routing.broker.locator.RSocketLocator;
 import io.rsocket.routing.broker.locator.UnicastRSocketLocator;
+import io.rsocket.routing.broker.locator.UnicastRSocketLocator.Loadbalancer;
+import io.rsocket.routing.broker.query.CombinedRSocketQuery;
+import io.rsocket.routing.broker.query.RSocketQuery;
+import io.rsocket.routing.broker.rsocket.MulticastRSocketLocator;
 import io.rsocket.routing.broker.rsocket.RoutingRSocketFactory;
 import io.rsocket.routing.broker.spring.cluster.BrokerConnections;
 import io.rsocket.routing.broker.spring.cluster.ClusterController;
@@ -103,17 +103,15 @@ public class BrokerAutoConfiguration implements InitializingBean {
 			}
 		});
 
-		RSocketStrategies rSocketStrategies = this.context
-				.getBean(RSocketStrategies.class);
+		RSocketStrategies rSocketStrategies = this.context.getBean(RSocketStrategies.class);
 		MetadataExtractor metadataExtractor = rSocketStrategies.metadataExtractor();
 
 		if (metadataExtractor instanceof DefaultMetadataExtractor) {
 			DefaultMetadataExtractor extractor = (DefaultMetadataExtractor) metadataExtractor;
 			// adds all RoutingFrame impls such as RouteJoin, RouteSetup, etc..
 			// to the spring encoding/decoding framework.
-			extractor
-					.metadataToExtract(MimeTypes.ROUTING_FRAME_MIME_TYPE, RoutingFrame.class,
-							MimeTypes.ROUTING_FRAME_METADATA_KEY);
+			extractor.metadataToExtract(MimeTypes.ROUTING_FRAME_MIME_TYPE, RoutingFrame.class,
+					MimeTypes.ROUTING_FRAME_METADATA_KEY);
 		}
 	}
 
@@ -130,13 +128,8 @@ public class BrokerAutoConfiguration implements InitializingBean {
 	}
 
 	@Bean
-	public RSocketIndex rSocketIndex(LoadbalanceStrategy loadbalanceStrategy) {
-		if (loadbalanceStrategy instanceof WeightedLoadbalanceStrategy) {
-			return new RSocketIndex(SimpleWeightedRSocket::new);
-		}
-		else {
-			return new RSocketIndex(Function.identity());
-		}
+	public RSocketIndex rSocketIndex() {
+		return new RSocketIndex(SimpleWeightedRSocket::new);
 	}
 
 	@Bean
@@ -150,19 +143,36 @@ public class BrokerAutoConfiguration implements InitializingBean {
 		return new ReactorResourceFactory();
 	}
 
-	// TODO: pick LoadBalancer algorithm via tags
 	@Bean
-	@ConditionalOnMissingBean
-	@ConditionalOnProperty(prefix = BROKER_PREFIX, name = "default-load-balancer", havingValue = "weighted")
-	public WeightedLoadbalanceStrategy weightedLoadBalancerFactory() {
-		return new WeightedLoadbalanceStrategy();
+	public Loadbalancer weightedLoadBalancer() {
+		WeightedLoadbalanceStrategy strategy = new WeightedLoadbalanceStrategy();
+		return new Loadbalancer() {
+			@Override
+			public String name() {
+				return "weighted";
+			}
+
+			@Override
+			public LoadbalanceStrategy strategy() {
+				return strategy;
+			}
+		};
 	}
 
 	@Bean
-	@ConditionalOnMissingBean
-	@ConditionalOnProperty(prefix = BROKER_PREFIX, name = "default-load-balancer", havingValue = "roundrobbin", matchIfMissing = true)
-	public RoundRobinLoadbalanceStrategy roundRobinLoadBalancerFactory() {
-		return new RoundRobinLoadbalanceStrategy();
+	public Loadbalancer roundRobinLoadBalancer() {
+		RoundRobinLoadbalanceStrategy strategy = new RoundRobinLoadbalanceStrategy();
+		return new Loadbalancer() {
+			@Override
+			public String name() {
+				return BrokerProperties.DEFAULT_LOAD_BALANCER;
+			}
+
+			@Override
+			public LoadbalanceStrategy strategy() {
+				return strategy;
+			}
+		};
 	}
 
 	@Bean
@@ -177,8 +187,10 @@ public class BrokerAutoConfiguration implements InitializingBean {
 	}
 
 	@Bean
-	public UnicastRSocketLocator unicastRSocketLocator(RSocketQuery rSocketQuery, RoutingTable routingTable, LoadbalanceStrategy loadbalanceStrategy) {
-		return new UnicastRSocketLocator(rSocketQuery, routingTable, loadbalanceStrategy);
+	public UnicastRSocketLocator unicastRSocketLocator(RSocketQuery rSocketQuery, RoutingTable routingTable,
+			ObjectProvider<Loadbalancer> loadbalancers, BrokerProperties properties) {
+		return new UnicastRSocketLocator(rSocketQuery, routingTable, loadbalancers.stream()
+				.collect(Collectors.toList()), properties.getDefaultLoadBalancer());
 	}
 
 	@Bean
@@ -239,13 +251,8 @@ public class BrokerAutoConfiguration implements InitializingBean {
 		}
 
 		@Bean
-		public ProxyConnections proxyConnections(LoadbalanceStrategy strategy) {
-			if (strategy instanceof WeightedLoadbalanceStrategy) {
-				return new ProxyConnections(SimpleWeightedRSocket::new);
-			}
-			else {
-				return new ProxyConnections(Function.identity());
-			}
+		public ProxyConnections proxyConnections() {
+			return new ProxyConnections(SimpleWeightedRSocket::new);
 		}
 
 		@Bean
@@ -315,8 +322,7 @@ public class BrokerAutoConfiguration implements InitializingBean {
 	/* for testing */ static class BrokerRSocketServerBootstrap extends RSocketServerBootstrap {
 
 		// purposefully using NettyRSocketServer
-		private static final Logger logger = LoggerFactory
-				.getLogger(NettyRSocketServer.class);
+		private static final Logger logger = LoggerFactory.getLogger(NettyRSocketServer.class);
 		private final String type;
 		private final String transport;
 		private final RSocketServerFactory serverFactory;
